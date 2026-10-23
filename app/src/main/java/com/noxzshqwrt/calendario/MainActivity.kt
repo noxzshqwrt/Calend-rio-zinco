@@ -1,20 +1,27 @@
 package com.noxzshqwrt.calendario
 
-import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.FileUpload
+import androidx.compose.material.icons.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Today
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -26,231 +33,298 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import org.json.JSONArray
-import org.json.JSONObject
+import kotlinx.coroutines.launch
+import java.time.Instant
 import java.time.LocalDate
 import java.time.YearMonth
 import java.time.ZoneOffset
 
-data class AppState(val trackingStart: String, val relapses: Set<String>)
-
-class Store(ctx: Context) {
-    private val prefs = ctx.getSharedPreferences("nofap_cal", Context.MODE_PRIVATE)
-    fun load(): AppState {
-        val start = prefs.getString("trackingStart", LocalDate.now().toString())
-            ?: LocalDate.now().toString()
-        val relapses = prefs.getStringSet("relapses", emptySet()) ?: emptySet()
-        return AppState(start, relapses)
-    }
-    fun save(s: AppState) {
-        prefs.edit()
-            .putString("trackingStart", s.trackingStart)
-            .putStringSet("relapses", s.relapses)
-            .apply()
-    }
-}
-
-fun todayStr() = LocalDate.now().toString()
-fun daysBetween(a: String, b: String): Int =
-    (LocalDate.parse(b).toEpochDay() - LocalDate.parse(a).toEpochDay()).toInt()
-fun formatBR(s: String): String {
-    val d = LocalDate.parse(s)
-    return "%02d/%02d/%d".format(d.dayOfMonth, d.monthValue, d.year)
-}
-fun currentStreak(s: AppState): Int {
-    var n = 0; var d = LocalDate.now()
-    val start = LocalDate.parse(s.trackingStart)
-    while (!d.isBefore(start)) {
-        if (d.toString() in s.relapses) break
-        n++; d = d.minusDays(1)
-    }
-    return n
-}
-fun bestStreak(s: AppState): Int {
-    val start = LocalDate.parse(s.trackingStart)
-    val today = LocalDate.now()
-    var max = 0; var cur = 0; var d = start
-    while (!d.isAfter(today)) {
-        if (d.toString() in s.relapses) cur = 0
-        else { cur++; if (cur > max) max = cur }
-        d = d.plusDays(1)
-    }
-    return max
-}
-fun totalClean(s: AppState): Int {
-    val start = LocalDate.parse(s.trackingStart)
-    val today = LocalDate.now()
-    var n = 0; var d = start
-    while (!d.isAfter(today)) {
-        if (d.toString() !in s.relapses) n++
-        d = d.plusDays(1)
-    }
-    return n
-}
-fun lastRelapse(s: AppState): String? {
-    val today = todayStr()
-    return s.relapses.filter { it <= today }.maxOrNull()
-}
-
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge(
-            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
-            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
-        )
+        enableEdgeToEdge()
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme()) {
-                Surface(color = Color(0xFF0A0A0F)) { CalendarApp() }
+            CalendarioTheme { CalendarScreen() }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CalendarScreen() {
+    val ctx = LocalContext.current
+    val store = remember { Store(ctx) }
+    var state by remember { mutableStateOf(store.load()) }
+    var viewMonth by remember { mutableStateOf(YearMonth.now()) }
+    var showDebug by remember { mutableStateOf(false) }
+    var showDatePicker by remember { mutableStateOf(false) }
+    var confirmReset by remember { mutableStateOf(false) }
+    var pendingImport by remember { mutableStateOf<AppState?>(null) }
+
+    val snackbarHost = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+
+    fun save(newState: AppState) {
+        state = newState
+        store.save(newState)
+    }
+
+    fun onDayTap(dayStr: String) {
+        val oldState = state
+        val wasRelapse = dayStr in oldState.relapses
+        val newState = oldState.copy(
+            relapses = if (wasRelapse) oldState.relapses - dayStr else oldState.relapses + dayStr
+        )
+        save(newState)
+        scope.launch {
+            val msg = if (wasRelapse) "Recaída de ${formatBR(dayStr)} removida"
+                      else "Recaída em ${formatBR(dayStr)} marcada"
+            val result = snackbarHost.showSnackbar(
+                message = msg,
+                actionLabel = "Desfazer",
+                duration = SnackbarDuration.Short
+            )
+            if (result == SnackbarResult.ActionPerformed) save(oldState)
+        }
+    }
+
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            try {
+                ctx.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use {
+                    it.write(store.toJson(state))
+                }
+                scope.launch { snackbarHost.showSnackbar("Backup exportado") }
+            } catch (e: Exception) {
+                scope.launch { snackbarHost.showSnackbar("Erro: ${e.message}") }
+            }
+        }
+    }
+
+    val importLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                val text = ctx.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                val parsed = text?.let { store.fromJson(it) }
+                if (parsed == null) {
+                    scope.launch { snackbarHost.showSnackbar("Arquivo JSON inválido") }
+                } else pendingImport = parsed
+            } catch (e: Exception) {
+                scope.launch { snackbarHost.showSnackbar("Erro: ${e.message}") }
+            }
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            CenterAlignedTopAppBar(
+                title = { Text("Calendário", fontWeight = FontWeight.Bold) },
+                actions = {
+                    IconButton(onClick = { viewMonth = YearMonth.now() }) {
+                        Icon(Icons.Default.Today, contentDescription = "Hoje")
+                    }
+                    IconButton(onClick = { showDebug = true }) {
+                        Icon(Icons.Default.Settings, contentDescription = "Ajustes")
+                    }
+                }
+            )
+        },
+        snackbarHost = { SnackbarHost(snackbarHost) }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            StreakCard(state)
+            StatsRow(state)
+            CalendarCard(
+                viewMonth = viewMonth,
+                state = state,
+                onPrev = { viewMonth = viewMonth.minusMonths(1) },
+                onNext = { viewMonth = viewMonth.plusMonths(1) },
+                onDayTap = ::onDayTap
+            )
+            Legend()
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+
+    if (showDebug) {
+        DebugSheet(
+            state = state,
+            onDismiss = { showDebug = false },
+            onExport = { exportLauncher.launch("nofap-cal-${todayStr().replace("-", "")}.json") },
+            onImport = { importLauncher.launch(arrayOf("application/json")) },
+            onChangeStart = { showDatePicker = true },
+            onReset = { confirmReset = true }
+        )
+    }
+
+    if (showDatePicker) {
+        val datePickerState = rememberDatePickerState(
+            initialSelectedDateMillis = LocalDate.parse(state.trackingStart)
+                .atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
+        )
+        DatePickerDialog(
+            onDismissRequest = { showDatePicker = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    datePickerState.selectedDateMillis?.let { millis ->
+                        val date = Instant.ofEpochMilli(millis).atZone(ZoneOffset.UTC).toLocalDate()
+                        if (date.isAfter(LocalDate.now())) {
+                            scope.launch { snackbarHost.showSnackbar("Data não pode ser no futuro") }
+                        } else {
+                            save(state.copy(trackingStart = date.toString()))
+                        }
+                    }
+                    showDatePicker = false
+                }) { Text("Salvar") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDatePicker = false }) { Text("Cancelar") }
+            }
+        ) {
+            DatePicker(state = datePickerState)
+        }
+    }
+
+    if (confirmReset) {
+        AlertDialog(
+            onDismissRequest = { confirmReset = false },
+            title = { Text("Apagar todos os dados?") },
+            text = { Text("Isso não pode ser desfeito. Considere exportar um backup antes.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        save(AppState(todayStr(), emptySet()))
+                        confirmReset = false
+                        scope.launch { snackbarHost.showSnackbar("Dados apagados") }
+                    },
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error
+                    )
+                ) { Text("Apagar") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmReset = false }) { Text("Cancelar") }
+            }
+        )
+    }
+
+    pendingImport?.let { imported ->
+        AlertDialog(
+            onDismissRequest = { pendingImport = null },
+            title = { Text("Importar backup?") },
+            text = {
+                Text(
+                    "Dados atuais serão substituídos.\n\n" +
+                    "Atual: início ${formatBR(state.trackingStart)}, ${state.relapses.size} recaída(s)\n" +
+                    "Novo: início ${formatBR(imported.trackingStart)}, ${imported.relapses.size} recaída(s)"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    save(imported)
+                    pendingImport = null
+                    scope.launch { snackbarHost.showSnackbar("Backup importado") }
+                }) { Text("Substituir") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingImport = null }) { Text("Cancelar") }
+            }
+        )
+    }
+}
+
+@Composable
+fun StreakCard(state: AppState) {
+    val streak = currentStreak(state)
+    val lr = lastRelapse(state)
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer
+        ),
+        shape = RoundedCornerShape(28.dp)
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 28.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                "$streak",
+                style = MaterialTheme.typography.displayLarge.copy(
+                    fontSize = 96.sp,
+                    fontWeight = FontWeight.Black,
+                    lineHeight = 96.sp
+                ),
+                color = MaterialTheme.colorScheme.onPrimaryContainer
+            )
+            Text(
+                if (streak == 1) "dia de streak" else "dias de streak",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
+            )
+            Spacer(Modifier.height(12.dp))
+            if (lr != null) {
+                val ago = daysBetween(lr, todayStr())
+                val txt = when (ago) { 0 -> "hoje"; 1 -> "ontem"; else -> "há $ago dias" }
+                Surface(
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f),
+                    shape = RoundedCornerShape(20.dp)
+                ) {
+                    Text(
+                        "Última recaída: ${formatBR(lr)} ($txt)",
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                }
+            } else {
+                Text(
+                    "Nenhuma recaída registrada 🎯",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                )
             }
         }
     }
 }
 
 @Composable
-fun CalendarApp() {
-    val ctx = LocalContext.current
-    val store = remember { Store(ctx) }
-    var state by remember { mutableStateOf(store.load()) }
-    var viewMonth by remember { mutableStateOf(YearMonth.now()) }
-    var debugExpanded by remember { mutableStateOf(false) }
-    val save = { newState: AppState -> state = newState; store.save(newState) }
-
-    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
-            try {
-                val text = ctx.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-                if (text != null) {
-                    val parsed = JSONObject(text)
-                    val d = parsed.optJSONObject("data") ?: parsed
-                    val start = d.getString("trackingStart")
-                    val arr = d.getJSONArray("relapses")
-                    val set = mutableSetOf<String>()
-                    for (i in 0 until arr.length()) set.add(arr.getString(i))
-                    save(AppState(start, set))
-                }
-            } catch (_: Exception) {}
-        }
-    }
-    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
-        if (uri != null) {
-            try {
-                val payload = JSONObject().apply {
-                    put("app", "nofap-cal")
-                    put("version", 1)
-                    put("exportedAt", java.time.Instant.now().toString())
-                    put("data", JSONObject().apply {
-                        put("trackingStart", state.trackingStart)
-                        put("relapses", JSONArray(state.relapses.toList()))
-                    })
-                }
-                ctx.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(payload.toString(2)) }
-            } catch (_: Exception) {}
-        }
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp)
+fun StatsRow(state: AppState) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("Calendário", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFFF2F2F7))
-            TextButton(onClick = { viewMonth = YearMonth.now() }) {
-                Text("hoje", color = Color(0xFFF2F2F7))
-            }
-        }
+        StatCard("Recorde", bestStreak(state), Modifier.weight(1f))
+        StatCard("Dias limpos", totalClean(state), Modifier.weight(1f))
+        StatCard("Tentativas", state.relapses.size + 1, Modifier.weight(1f))
+    }
+}
 
-        val cs = currentStreak(state)
-        val lr = lastRelapse(state)
-
-        Column(
-            modifier = Modifier.fillMaxWidth()
-                .background(Color(0xFF14141C), RoundedCornerShape(16.dp))
-                .padding(22.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
+@Composable
+fun StatCard(label: String, value: Int, modifier: Modifier = Modifier) {
+    OutlinedCard(modifier = modifier) {
+        Column(Modifier.padding(14.dp)) {
             Text(
-                "$cs", fontSize = 58.sp, fontWeight = FontWeight.ExtraBold,
-                color = if (cs == 0) Color(0xFFFF4757) else Color(0xFF2ED573)
+                "$value",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold
             )
             Text(
-                if (cs == 1) "dia de streak" else "dias de streak",
-                fontSize = 12.sp, color = Color(0xFF7A7A8C), fontWeight = FontWeight.SemiBold
+                label,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Spacer(Modifier.height(10.dp))
-            Text(
-                if (lr == null) "nenhuma recaída registrada" else {
-                    val ago = daysBetween(lr, todayStr())
-                    val txt = when (ago) { 0 -> "hoje"; 1 -> "ontem"; else -> "há $ago dias" }
-                    "última recaída: ${formatBR(lr)} ($txt)"
-                },
-                fontSize = 12.sp, color = Color(0xFF7A7A8C)
-            )
-        }
-
-        Spacer(Modifier.height(16.dp))
-        CalendarCard(viewMonth, { viewMonth = viewMonth.minusMonths(1) },
-            { viewMonth = viewMonth.plusMonths(1) }, state) { day ->
-            val newSet = if (day in state.relapses) state.relapses - day else state.relapses + day
-            save(state.copy(relapses = newSet))
-        }
-        Spacer(Modifier.height(16.dp))
-
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-            LegendDot(Color(0xFF2ED573), "limpo"); Spacer(Modifier.width(18.dp))
-            LegendDot(Color(0xFFFF4757), "recaída"); Spacer(Modifier.width(18.dp))
-            LegendDot(Color(0xFF7A7A8C), "futuro")
-        }
-        Spacer(Modifier.height(16.dp))
-
-        Column(
-            modifier = Modifier.fillMaxWidth()
-                .background(Color(0xFF14141C), RoundedCornerShape(12.dp))
-                .padding(14.dp)
-        ) {
-            Text(
-                "debug", color = Color(0xFF7A7A8C), fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.clickable { debugExpanded = !debugExpanded }
-            )
-            if (debugExpanded) {
-                Spacer(Modifier.height(12.dp))
-                Text(
-                    JSONObject().apply {
-                        put("trackingStart", state.trackingStart)
-                        put("relapses", JSONArray(state.relapses.toList()))
-                        put("currentStreak", cs)
-                        put("bestStreak", bestStreak(state))
-                        put("totalCleanDays", totalClean(state))
-                    }.toString(2),
-                    fontSize = 11.sp, color = Color(0xFF7A7A8C), fontFamily = FontFamily.Monospace
-                )
-                Spacer(Modifier.height(12.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = {
-                        exportLauncher.launch("nofap-cal-${todayStr().replace("-", "")}.json")
-                    }, modifier = Modifier.weight(1f)) {
-                        Text("exportar", fontSize = 12.sp, color = Color(0xFFF2F2F7))
-                    }
-                    OutlinedButton(onClick = {
-                        importLauncher.launch(arrayOf("application/json"))
-                    }, modifier = Modifier.weight(1f)) {
-                        Text("importar", fontSize = 12.sp, color = Color(0xFFF2F2F7))
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-                OutlinedButton(onClick = {
-                    save(AppState(todayStr(), emptySet()))
-                }, modifier = Modifier.fillMaxWidth()) {
-                    Text("reset tudo", fontSize = 12.sp, color = Color(0xFFFF4757))
-                }
-            }
         }
     }
 }
@@ -258,48 +332,75 @@ fun CalendarApp() {
 @Composable
 fun CalendarCard(
     viewMonth: YearMonth,
+    state: AppState,
     onPrev: () -> Unit,
     onNext: () -> Unit,
-    state: AppState,
-    onToggle: (String) -> Unit,
+    onDayTap: (String) -> Unit
 ) {
     val monthNames = listOf("Janeiro","Fevereiro","Março","Abril","Maio","Junho","Julho","Agosto","Setembro","Outubro","Novembro","Dezembro")
     val today = todayStr()
-    val firstDay = viewMonth.atDay(1)
-    val startWeekday = firstDay.dayOfWeek.value % 7
+    val startWeekday = viewMonth.atDay(1).dayOfWeek.value % 7
     val daysInMonth = viewMonth.lengthOfMonth()
 
-    Column(
-        modifier = Modifier.fillMaxWidth()
-            .background(Color(0xFF14141C), RoundedCornerShape(16.dp))
-            .padding(14.dp)
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+        ),
+        shape = RoundedCornerShape(24.dp)
     ) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onPrev) { Text("‹", fontSize = 26.sp, color = Color(0xFFF2F2F7)) }
-            Text("${monthNames[viewMonth.monthValue - 1]} ${viewMonth.year}", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFF2F2F7))
-            IconButton(onClick = onNext) { Text("›", fontSize = 26.sp, color = Color(0xFFF2F2F7)) }
-        }
-        Row(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-            listOf("D","S","T","Q","Q","S","S").forEach { d ->
-                Text(d, Modifier.weight(1f), textAlign = TextAlign.Center, fontSize = 11.sp,
-                    color = Color(0xFF7A7A8C), fontWeight = FontWeight.SemiBold)
+        Column(Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                FilledTonalIconButton(onClick = onPrev) {
+                    Icon(Icons.Default.KeyboardArrowLeft, contentDescription = "Mês anterior")
+                }
+                Text(
+                    "${monthNames[viewMonth.monthValue - 1]} ${viewMonth.year}",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                FilledTonalIconButton(onClick = onNext) {
+                    Icon(Icons.Default.KeyboardArrowRight, contentDescription = "Próximo mês")
+                }
             }
-        }
-
-        val cells = mutableListOf<Pair<Int, String?>>()
-        for (i in 0 until startWeekday) cells.add(-1 to null)
-        for (d in 1..daysInMonth) cells.add(d to viewMonth.atDay(d).toString())
-
-        var idx = 0
-        while (idx < cells.size) {
+            Spacer(Modifier.height(12.dp))
             Row(Modifier.fillMaxWidth()) {
-                for (j in 0 until 7) {
-                    if (idx >= cells.size) { Spacer(Modifier.weight(1f)) }
-                    else {
-                        val (dayNum, dayStr) = cells[idx]
-                        if (dayNum == -1) Spacer(Modifier.weight(1f))
-                        else DayCell(dayNum, dayStr!!, state, dayStr == today, onToggle, Modifier.weight(1f))
-                        idx++
+                listOf("D","S","T","Q","Q","S","S").forEach { d ->
+                    Text(
+                        d,
+                        Modifier.weight(1f),
+                        textAlign = TextAlign.Center,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            val totalCells = startWeekday + daysInMonth
+            val weeks = (totalCells + 6) / 7
+            for (w in 0 until weeks) {
+                Row(Modifier.fillMaxWidth()) {
+                    for (d in 0 until 7) {
+                        val idx = w * 7 + d
+                        if (idx < startWeekday || idx >= startWeekday + daysInMonth) {
+                            Spacer(Modifier.weight(1f))
+                        } else {
+                            val day = idx - startWeekday + 1
+                            val dayStr = viewMonth.atDay(day).toString()
+                            DayCell(
+                                day = day,
+                                dayStr = dayStr,
+                                state = state,
+                                isToday = dayStr == today,
+                                onTap = { onDayTap(dayStr) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
                     }
                 }
             }
@@ -308,44 +409,172 @@ fun CalendarCard(
 }
 
 @Composable
-fun DayCell(day: Int, dayStr: String, state: AppState, isToday: Boolean, onToggle: (String) -> Unit, modifier: Modifier = Modifier) {
+fun DayCell(
+    day: Int,
+    dayStr: String,
+    state: AppState,
+    isToday: Boolean,
+    onTap: () -> Unit,
+    modifier: Modifier = Modifier
+) {
     val today = todayStr()
     val isFuture = dayStr > today
     val isBefore = dayStr < state.trackingStart
     val isRelapse = dayStr in state.relapses
     val isClean = !isFuture && !isBefore && !isRelapse
+    val interactive = !isFuture && !isBefore
 
-    val bg = when {
+    val containerColor = when {
         isFuture || isBefore -> Color.Transparent
-        isRelapse -> Color(0x38FF4757)
-        isClean -> Color(0x292ED573)
+        isRelapse -> MaterialTheme.colorScheme.errorContainer
+        isClean -> MaterialTheme.colorScheme.tertiaryContainer
         else -> Color.Transparent
     }
-    val fg = when {
-        isFuture || isBefore -> Color(0xFF7A7A8C).copy(alpha = 0.35f)
-        isRelapse -> Color(0xFFFF4757)
-        isClean -> Color(0xFF2ED573)
-        else -> Color(0xFFF2F2F7)
+    val contentColor = when {
+        isFuture || isBefore -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
+        isRelapse -> MaterialTheme.colorScheme.onErrorContainer
+        isClean -> MaterialTheme.colorScheme.onTertiaryContainer
+        else -> MaterialTheme.colorScheme.onSurface
     }
+
     Box(
-        modifier = modifier
-            .aspectRatio(1f)
-            .padding(2.dp)
-            .background(bg, RoundedCornerShape(10.dp))
-            .then(if (isToday) Modifier.border(2.dp, Color(0xFFFFA502), RoundedCornerShape(10.dp)) else Modifier)
-            .clickable(enabled = !isFuture && !isBefore) { onToggle(dayStr) },
+        modifier = modifier.aspectRatio(1f).padding(2.dp),
         contentAlignment = Alignment.Center
     ) {
-        Text("$day", color = fg, fontSize = 14.sp,
-            fontWeight = if (isRelapse || isClean) FontWeight.Bold else FontWeight.Normal)
+        Surface(
+            onClick = onTap,
+            enabled = interactive,
+            shape = CircleShape,
+            color = containerColor,
+            contentColor = contentColor,
+            border = if (isToday) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
+            modifier = Modifier.fillMaxSize().padding(2.dp)
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Text(
+                    "$day",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = if (isRelapse || isClean) FontWeight.Bold else FontWeight.Normal
+                )
+            }
+        }
     }
 }
 
 @Composable
-fun LegendDot(color: Color, label: String) {
+fun Legend() {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterHorizontally)
+    ) {
+        LegendChip("Limpo", MaterialTheme.colorScheme.tertiaryContainer)
+        LegendChip("Recaída", MaterialTheme.colorScheme.errorContainer)
+        LegendChip("Futuro", MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+    }
+}
+
+@Composable
+fun LegendChip(label: String, color: Color) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(11.dp).background(color, RoundedCornerShape(4.dp)))
+        Box(Modifier.size(14.dp).background(color, CircleShape))
         Spacer(Modifier.width(6.dp))
-        Text(label, fontSize = 12.sp, color = Color(0xFF7A7A8C))
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun DebugSheet(
+    state: AppState,
+    onDismiss: () -> Unit,
+    onExport: () -> Unit,
+    onImport: () -> Unit,
+    onChangeStart: () -> Unit,
+    onReset: () -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 24.dp)
+                .padding(bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Text("Debug", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+
+            OutlinedCard(onClick = onChangeStart, modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    Modifier.fillMaxWidth().padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.CalendarMonth, contentDescription = null)
+                    Spacer(Modifier.width(16.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("Início do tracking", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            formatBR(state.trackingStart),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            Text(
+                "Estado atual",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    """
+                    currentStreak: ${currentStreak(state)}
+                    bestStreak: ${bestStreak(state)}
+                    totalCleanDays: ${totalClean(state)}
+                    relapses: ${state.relapses.size}
+                    """.trimIndent(),
+                    modifier = Modifier.padding(16.dp),
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Default.FileDownload, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Exportar")
+                }
+                OutlinedButton(onClick = onImport, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Default.FileUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Importar")
+                }
+            }
+
+            Button(
+                onClick = onReset,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                    contentColor = MaterialTheme.colorScheme.onErrorContainer
+                )
+            ) {
+                Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Apagar todos os dados")
+            }
+        }
     }
 }
