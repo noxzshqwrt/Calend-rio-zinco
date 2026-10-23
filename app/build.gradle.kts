@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace = "com.fernando.calendario"
+    namespace = "com.noxzshqwrt.calendario"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.fernando.calendario"
+        applicationId = "com.noxzshqwrt.calendario"
         minSdk = 26
         targetSdk = 34
         versionCode = 1
