@@ -42,6 +42,7 @@ import java.time.ZoneOffset
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        initReminder(this)
         enableEdgeToEdge()
         setContent {
             CalendarioTheme { CalendarScreen() }

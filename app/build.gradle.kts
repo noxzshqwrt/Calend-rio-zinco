@@ -12,12 +12,27 @@ android {
         applicationId = "com.noxzshqwrt.calendario"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.2-m3-debug"
+        versionCode = 3
+        versionName = "0.3-reminder"
+    }
+
+    signingConfigs {
+        create("stable") {
+            storeFile = file("keystore/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
-        release { isMinifyEnabled = false }
+        debug {
+            signingConfig = signingConfigs.getByName("stable")
+        }
+        release {
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("stable")
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -37,4 +52,5 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.0")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.2")
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
 }
